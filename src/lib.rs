@@ -74,7 +74,7 @@ pub enum ManifestError
     VersionMismatch /* dmfs image is of a later version than this code is aware of */
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum ManifestObjectType
 {
     BootMsg, /* a textfile to output to the hypervisor's debug channel during startup */
@@ -182,8 +182,8 @@ impl Manifest
             /* just stream out the object data */
             b.add_u32(object.get_type().to_integer());
             b.add_u32(object.get_contents_size() as u32);
-            b.add_string(object.get_name().as_str());
-            b.add_string(object.get_description().as_str());
+            b.add_null_term_string(object.get_name().as_str());
+            b.add_null_term_string(object.get_description().as_str());
             b.pad_to_u32();
             for byte in object.get_contents()
             {
