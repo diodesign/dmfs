@@ -18,7 +18,7 @@
  * 
  * To read a DMFS image in memory:
  * 1. call ManifestImageIter::from_slice() using a byte slice of the dmfs image in memory
- * 2. Iterate the ManifestImageIter to get its contents
+ * 2. Iterate the ManifestImageIter to get its contents as a series of manifest objects
  * 
  * This does not require the standard library though it does require a heap allocator.
  * 
@@ -61,6 +61,7 @@ use core::mem::size_of;
 use alloc::vec::Vec;
 use alloc::string::String;
 use byterider::Bytes;
+use core::ops::Range;
 
 /* manifest image must start with the following */
 const MANIFEST_MAGIC: u32 = 0xD105C001;
@@ -71,7 +72,8 @@ pub enum ManifestError
 {
     MalformedHeader, /* header is too small or malformed */
     BadMagic, /* unrecognized magic number in dmfs image header */
-    VersionMismatch /* dmfs image is of a later version than this code is aware of */
+    VersionMismatch, /* dmfs image is of a later version than this code is aware of */
+    CantUseRegionHere /* trying to use a region of an image to generate an image */
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,13 +114,34 @@ impl ManifestObjectType
     }
 }
 
+/* define the source of an object's data: an independent array, or a chunk of the image in memory
+   Bytes should be used when generating an image from outside data.
+   Bytes and Region can be used when parsing an image from memory. */
+pub enum ManifestObjectData
+{
+    Bytes(Vec<u8>), /* contents as a separate byte vector */
+    Region(Range<usize>) /* start and end indexes into the manifest image in memory */
+}
+
+impl ManifestObjectData
+{
+    pub fn len(&self) -> usize
+    {
+        match self
+        {
+            ManifestObjectData::Bytes(v) => v.len(),
+            ManifestObjectData::Region(r) => r.end - r.start
+        }
+    }
+}
+
 /* describe an object to be added to or already in a manifest */
 pub struct ManifestObject
 {
     objtype: ManifestObjectType, /* type of the object */
     name: String, /* unique identifier for this object */
     descr: String, /* user-friendly description of this object */
-    data: Vec<u8> /* contents of the object */
+    data: ManifestObjectData /* contents of the object */
 }
 
 impl ManifestObject
@@ -128,21 +151,21 @@ impl ManifestObject
           name = unique name for the object
           descr = user-friendly description of this object
           data = object contents */
-    pub fn new(objtype: ManifestObjectType, name: String, descr: String, data: Vec<u8>) -> ManifestObject
+    pub fn new(objtype: ManifestObjectType, name: String, descr: String, data: ManifestObjectData) -> ManifestObject
     {
         ManifestObject
         {
-            objtype: objtype,
-            name: name,
-            descr: descr,
-            data: data
+            objtype,
+            name,
+            descr,
+            data
         }
     }
 
     pub fn get_type(&self) -> ManifestObjectType { self.objtype }
     pub fn get_name(&self) -> String { self.name.clone() }
     pub fn get_description(&self) -> String { self.descr.clone() }
-    pub fn get_contents(&self) -> &[u8] { self.data.as_slice() }
+    pub fn get_contents(&self) -> &ManifestObjectData { &self.data }
     pub fn get_contents_size(&self) -> usize { self.data.len() }
 }
 
@@ -185,11 +208,21 @@ impl Manifest
             b.add_null_term_string(object.get_name().as_str());
             b.add_null_term_string(object.get_description().as_str());
             b.pad_to_u32();
-            for byte in object.get_contents()
+
+            /* copy object bytes into the image */
+            match object.get_contents()
             {
-                b.add_u8(*byte);
+                ManifestObjectData::Bytes(bytes) =>
+                {
+                    for byte in bytes
+                    {
+                        b.add_u8(*byte);
+                    }
+                    b.pad_to_u32();
+                },
+
+                _ => return Err(ManifestError::CantUseRegionHere)
             }
-            b.pad_to_u32();
         }
 
         /* add the bookend type */
@@ -203,7 +236,7 @@ impl Manifest
 pub struct ManifestImageIter
 {
     offset: usize,
-    bytes: Bytes
+    bytes: Bytes,
 }
 
 impl ManifestImageIter
@@ -245,8 +278,8 @@ impl ManifestImageIter
 
         Ok(ManifestImageIter
         {
-            bytes: bytes,
-            offset: offset /* skip header */
+            bytes,
+            offset /* skip header */
         })
     }
 }
@@ -283,23 +316,18 @@ impl Iterator for ManifestImageIter
         /* align to next 32-bit word. include the description string's null byte */
         offset = Bytes::align_to_next_u32(offset);
 
-        /* copy data into object. FIXME: can we do this in a more efficient manner? */
-        let mut contents = Vec::new();
-        for _ in 0..obj_size
-        {
-            contents.push(self.bytes.read_u8(offset)?);
-            offset = offset + 1;
-        }
+        /* define the region of the image that contains the object's contents */
+        let region = Range { start: offset, end: offset + obj_size as usize };
 
         /* save the offset for the next time round */
-        self.offset = Bytes::align_to_next_u32(offset);
+        self.offset = Bytes::align_to_next_u32(offset + obj_size as usize);
 
         Some(ManifestObject
         {
             objtype: obj_type,
             name: obj_name,
             descr: obj_desc,
-            data: contents
+            data: ManifestObjectData::Region(region)
         })
     }
 }
