@@ -80,7 +80,7 @@ pub enum ManifestError
 pub enum ManifestObjectType
 {
     BootMsg, /* a textfile to output to the hypervisor's debug channel during startup */
-    SystemService, /* executable guest that must be run at startup */
+    SystemService, /* executable application to be run at startup */
     GuestOS, /* executable guest OS to be loaded later */
     Unknown, /* reserved for unrecognized types */
     EndOfList /* signify we're at the end of the image */
