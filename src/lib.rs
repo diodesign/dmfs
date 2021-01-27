@@ -35,11 +35,15 @@
 
    then multiple sequential blocks, each representing an object, of:
 
+   u32: magic header that must equal MANIFEST_OBJECT_MAGIC
    u32: object type, chosen from one of ManifestObjectType.
         if the type is EndOfList then the image stops here.
    u32: size of object's contents in bytes. Limits objects to 4GB in size.
    <NULL-terminated string of this object's unique name>
    <NULL-terminated string describing this object>
+   <NULL padding to next 32-bit word>
+   u32: number of properties (N) granted to this object
+   N x <NULL-terminated property string>
    <NULL padding to next 32-bit word>
    <contents of the object as a byte stream>
    <NULL padding to next 32-bit word>
@@ -65,6 +69,7 @@ use core::ops::Range;
 
 /* manifest image must start with the following */
 const MANIFEST_MAGIC: u32 = 0xD105C001;
+const MANIFEST_OBJECT_MAGIC: u32 = 0xD1015D4D;
 const MANIFEST_VERSION: u32 = 1; /* maximum version supported */
 
 #[derive(Debug)]
@@ -141,6 +146,7 @@ pub struct ManifestObject
     objtype: ManifestObjectType, /* type of the object */
     name: String, /* unique identifier for this object */
     descr: String, /* user-friendly description of this object */
+    properties: Vec<String>, /* list of properties granted to this object */
     data: ManifestObjectData /* contents of the object */
 }
 
@@ -150,21 +156,28 @@ impl ManifestObject
        => objtype = object type
           name = unique name for the object
           descr = user-friendly description of this object
-          data = object contents */
-    pub fn new(objtype: ManifestObjectType, name: String, descr: String, data: ManifestObjectData) -> ManifestObject
+          data = object contents
+          props = array of properties assigned to the object, or None */
+    pub fn new(objtype: ManifestObjectType, name: String, descr: String, data: ManifestObjectData, properties: Option<Vec<String>>) -> ManifestObject
     {
         ManifestObject
         {
             objtype,
             name,
             descr,
-            data
+            data,
+            properties: match properties
+            {
+                Some(p) => p,
+                None => Vec::new()
+            }
         }
     }
 
     pub fn get_type(&self) -> ManifestObjectType { self.objtype }
     pub fn get_name(&self) -> String { self.name.clone() }
     pub fn get_description(&self) -> String { self.descr.clone() }
+    pub fn get_properties(&self) -> Vec<String> { self.properties.clone() }
     pub fn get_contents(&self) -> &ManifestObjectData { &self.data }
     pub fn get_contents_size(&self) -> usize { self.data.len() }
 }
@@ -202,11 +215,23 @@ impl Manifest
 
         for object in &self.objects
         {
-            /* just stream out the object data */
+            /* include magic for integrity check reasons */
+            b.add_u32(MANIFEST_OBJECT_MAGIC);
+
+            /* stream out the object data */
             b.add_u32(object.get_type().to_integer());
             b.add_u32(object.get_contents_size() as u32);
             b.add_null_term_string(object.get_name().as_str());
             b.add_null_term_string(object.get_description().as_str());
+            b.pad_to_u32();
+
+            /* output number of properties (N) assigned to this object
+               and then write out N properties as null-term'd strings */
+            b.add_u32(object.properties.len() as u32);
+            for property in &object.properties
+            {
+                b.add_null_term_string(property.as_str());   
+            }
             b.pad_to_u32();
 
             /* copy object bytes into the image */
@@ -295,8 +320,15 @@ impl Iterator for ManifestImageIter
         let mut offset = self.offset;
         let width = size_of::<u32>();
 
-        /* extract the object's meta data. end the iteration if
-        we reach an EndOfList placeholder object */
+        /* make sure the magic matches for this object, or bail */
+        if self.bytes.read_u32(offset)? != MANIFEST_OBJECT_MAGIC
+        {
+            return None;
+        }
+        offset = offset + width;
+
+        /* extract the object's meta data.
+        end the iteration if we reach an EndOfList placeholder object */
         let obj_type = match ManifestObjectType::from_integer(self.bytes.read_u32(offset)?)
         {
             ManifestObjectType::EndOfList => return None,
@@ -312,8 +344,18 @@ impl Iterator for ManifestImageIter
 
         let obj_desc = self.bytes.read_null_term_string(offset)?;
         offset = offset + obj_desc.len() + 1; // don't forget the null byte
+        offset = Bytes::align_to_next_u32(offset);
 
-        /* align to next 32-bit word. include the description string's null byte */
+        let obj_property_count = self.bytes.read_u32(offset)?;
+        offset = offset + width;
+        let mut obj_props = Vec::new();
+
+        for _ in 0..obj_property_count
+        {
+            let prop_string = self.bytes.read_null_term_string(offset)?;
+            offset = offset + prop_string.len() + 1; // don't forget the null byte
+            obj_props.push(prop_string);
+        }
         offset = Bytes::align_to_next_u32(offset);
 
         /* define the region of the image that contains the object's contents */
@@ -327,6 +369,7 @@ impl Iterator for ManifestImageIter
             objtype: obj_type,
             name: obj_name,
             descr: obj_desc,
+            properties: obj_props,
             data: ManifestObjectData::Region(region)
         })
     }
