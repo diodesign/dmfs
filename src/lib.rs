@@ -22,7 +22,7 @@
  * 
  * This does not require the standard library though it does require a heap allocator.
  * 
- * (c) Chris Williams, 2020.
+ * (c) Chris Williams, 2021.
  *
  * See LICENSE for usage and copying.
  */
@@ -38,17 +38,16 @@
    u32: magic header that must equal MANIFEST_OBJECT_MAGIC
    u32: object type, chosen from one of ManifestObjectType.
         if the type is EndOfList then the image stops here.
-   u32: size of object's contents in bytes. Limits objects to 4GB in size.
+   u64: size of object's contents in bytes.
    <NULL-terminated string of this object's unique name>
    <NULL-terminated string describing this object>
    <NULL padding to next 32-bit word>
    u32: number of properties (N) granted to this object
-   N x <NULL-terminated property string>
-   <NULL padding to next 32-bit word>
+   N x <NULL-terminated property strings>
+   <NULL padding to next 64-bit word>
    <contents of the object as a byte stream>
-   <NULL padding to next 32-bit word>
+   <NULL padding to next 64-bit word>
 
-    where usize is 4 bytes (u32) for 32-bit targets, and 8 bytes (u64) for 64-bit targets.
     the object name could be a filename, or something other code can use to identify it.
     it should be unique among all the other objects in the dmfs image.
 
@@ -70,7 +69,12 @@ use core::ops::Range;
 /* manifest image must start with the following */
 const MANIFEST_MAGIC: u32 = 0xD105C001;
 const MANIFEST_OBJECT_MAGIC: u32 = 0xD1015D4D;
-const MANIFEST_VERSION: u32 = 1; /* maximum version supported */
+const MANIFEST_VERSION: u32 = 2; /* version supported */
+
+/* version history
+   1 = 32-bit object content padding and 32-bit object sizes
+   2 = 64-bit object content padding and 64-bit object sizes
+*/
 
 #[derive(Debug)]
 pub enum ManifestError
@@ -220,7 +224,7 @@ impl Manifest
 
             /* stream out the object data */
             b.add_u32(object.get_type().to_integer());
-            b.add_u32(object.get_contents_size() as u32);
+            b.add_u64(object.get_contents_size() as u64);
             b.add_null_term_string(object.get_name().as_str());
             b.add_null_term_string(object.get_description().as_str());
             b.pad_to_u32();
@@ -232,7 +236,7 @@ impl Manifest
             {
                 b.add_null_term_string(property.as_str());   
             }
-            b.pad_to_u32();
+            b.pad_to_u64();
 
             /* copy object bytes into the image */
             match object.get_contents()
@@ -243,7 +247,7 @@ impl Manifest
                     {
                         b.add_u8(*byte);
                     }
-                    b.pad_to_u32();
+                    b.pad_to_u64();
                 },
 
                 _ => return Err(ManifestError::CantUseRegionHere)
@@ -319,6 +323,7 @@ impl Iterator for ManifestImageIter
         /* pick up from where we were last at */
         let mut offset = self.offset;
         let width = size_of::<u32>();
+        let double_width = size_of::<u64>();
 
         /* make sure the magic matches for this object, or bail */
         if self.bytes.read_u32(offset)? != MANIFEST_OBJECT_MAGIC
@@ -336,8 +341,8 @@ impl Iterator for ManifestImageIter
         };
         offset = offset + width;
 
-        let obj_size = self.bytes.read_u32(offset)?;
-        offset = offset + width;
+        let obj_size = self.bytes.read_u64(offset)?;
+        offset = offset + double_width;
 
         let obj_name = self.bytes.read_null_term_string(offset)?;
         offset = offset + obj_name.len() + 1; // don't forget the null byte
@@ -356,13 +361,13 @@ impl Iterator for ManifestImageIter
             offset = offset + prop_string.len() + 1; // don't forget the null byte
             obj_props.push(prop_string);
         }
-        offset = Bytes::align_to_next_u32(offset);
+        offset = Bytes::align_to_next_u64(offset);
 
         /* define the region of the image that contains the object's contents */
         let region = Range { start: offset, end: offset + obj_size as usize };
 
         /* save the offset for the next time round */
-        self.offset = Bytes::align_to_next_u32(offset + obj_size as usize);
+        self.offset = Bytes::align_to_next_u64(offset + obj_size as usize);
 
         Some(ManifestObject
         {
